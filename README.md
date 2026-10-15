@@ -58,9 +58,13 @@ The environment is built on Docker and Docker Compose, with Portainer for contai
 | **Backup Storage** | `/data/backups` |
 | **Docker Volumes** | `/var/lib/docker/volumes` |
 
+![Architecture](images/specs.png)
+
 ---
 
 ## 3. Active Containers
+
+![Architecture](images/screenshot.png)
 
 ### 3.1 DevOps & Edge
 
