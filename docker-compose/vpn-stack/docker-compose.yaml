@@ -1,0 +1,22 @@
+name: vpn-stack
+
+services:
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: tailscale
+    hostname: mallardserver2
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_ROUTES=192.168.1.0/24
+      - TS_USERSPACE=false
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - tailscale_state:/var/lib/tailscale
+
+volumes:
+  tailscale_state: {name: tailscale_state}

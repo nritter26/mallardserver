@@ -1,0 +1,228 @@
+name: monitoring-stack
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=5GB
+    ports:
+      - "9090:9090"
+    configs:
+      - source: prometheus_cfg
+        target: /etc/prometheus/prometheus.yml
+    volumes:
+      - prometheus_data:/prometheus
+    networks: [monitoring, proxy]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.prometheus.rule=Host(`prometheus.mallard`)
+      - traefik.http.routers.prometheus.entrypoints=web
+      - traefik.http.services.prometheus.loadbalancer.server.port=9090
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_SERVER_ROOT_URL=http://192.168.1.121:3000
+    ports:
+      - "3000:3000"
+    configs:
+      - source: grafana_ds
+        target: /etc/grafana/provisioning/datasources/datasources.yml
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on: [prometheus, loki]
+    networks: [monitoring, proxy]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.grafana.rule=Host(`grafana.mallard`)
+      - traefik.http.routers.grafana.entrypoints=web
+      - traefik.http.services.grafana.loadbalancer.server.port=3000
+
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/loki.yml
+    configs:
+      - source: loki_cfg
+        target: /etc/loki/loki.yml
+    volumes:
+      - loki_data:/loki
+    networks: [monitoring]
+
+  promtail:
+    image: grafana/promtail:latest
+    container_name: promtail
+    restart: unless-stopped
+    command: -config.file=/etc/promtail/config.yml
+    configs:
+      - source: promtail_cfg
+        target: /etc/promtail/config.yml
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on: [loki]
+    networks: [monitoring]
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    restart: unless-stopped
+    privileged: true
+    devices: ["/dev/kmsg"]
+    command:
+      - --housekeeping_interval=30s
+      - --docker_only=true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    networks: [monitoring]
+
+  nvidia-gpu-exporter:
+    image: utkuozdemir/nvidia_gpu_exporter:latest
+    container_name: nvidia-gpu-exporter
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, count: all, capabilities: [gpu, utility]}
+    networks: [monitoring]
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: jaeger
+    restart: unless-stopped
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - SPAN_STORAGE_TYPE=memory
+      - MEMORY_MAX_TRACES=10000
+    ports:
+      - "16686:16686"
+    networks: [monitoring, proxy]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.jaeger.rule=Host(`jaeger.mallard`)
+      - traefik.http.routers.jaeger.entrypoints=web
+      - traefik.http.services.jaeger.loadbalancer.server.port=16686
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.104.0
+    container_name: otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yml"]
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    configs:
+      - source: otel_cfg
+        target: /etc/otelcol/config.yml
+    depends_on: [jaeger]
+    networks: [monitoring, proxy]
+
+configs:
+  prometheus_cfg:
+    content: |
+      global:
+        scrape_interval: 60s
+      scrape_configs:
+        - job_name: prometheus
+          static_configs: [{targets: ["localhost:9090"]}]
+        - job_name: cadvisor
+          scrape_interval: 120s
+          static_configs: [{targets: ["cadvisor:8080"]}]
+        - job_name: nvidia-gpu
+          static_configs: [{targets: ["nvidia-gpu-exporter:9835"]}]
+  grafana_ds:
+    content: |
+      apiVersion: 1
+      datasources:
+        - name: Prometheus
+          type: prometheus
+          url: http://prometheus:9090
+          isDefault: true
+          jsonData:
+            timeInterval: 120s
+        - {name: Loki, type: loki, url: "http://loki:3100"}
+        - {name: Jaeger, type: jaeger, url: "http://jaeger:16686"}
+  loki_cfg:
+    content: |
+      auth_enabled: false
+      server: {http_listen_port: 3100}
+      analytics: {reporting_enabled: false}
+      common:
+        path_prefix: /loki
+        storage:
+          filesystem: {chunks_directory: /loki/chunks, rules_directory: /loki/rules}
+        replication_factor: 1
+        ring: {instance_addr: 127.0.0.1, kvstore: {store: inmemory}}
+      schema_config:
+        configs:
+          - from: 2024-01-01
+            store: tsdb
+            object_store: filesystem
+            schema: v13
+            index: {prefix: index_, period: 24h}
+      limits_config:
+        retention_period: 168h
+      compactor:
+        working_directory: /loki/compactor
+        retention_enabled: true
+        delete_request_store: filesystem
+  promtail_cfg:
+    content: |
+      server:
+        http_listen_port: 9080
+      positions:
+        filename: /tmp/positions.yaml
+      clients:
+        - url: http://loki:3100/loki/api/v1/push
+      scrape_configs:
+        - job_name: docker
+          docker_sd_configs:
+            - host: unix:///var/run/docker.sock
+              refresh_interval: 15s
+          relabel_configs:
+            - source_labels: ['__meta_docker_container_name']
+              regex: '/(.*)'
+              target_label: container
+  otel_cfg:
+    content: |
+      receivers:
+        otlp:
+          protocols:
+            grpc: {endpoint: 0.0.0.0:4317}
+            http: {endpoint: 0.0.0.0:4318}
+      processors:
+        memory_limiter:
+          check_interval: 5s
+          limit_mib: 256
+        batch: {}
+      exporters:
+        otlp/jaeger:
+          endpoint: jaeger:4317
+          tls: {insecure: true}
+      service:
+        pipelines:
+          traces:
+            receivers: [otlp]
+            processors: [memory_limiter, batch]
+            exporters: [otlp/jaeger]
+
+volumes:
+  prometheus_data: {name: prometheus_data}
+  grafana_data:    {name: grafana_data}
+  loki_data:       {name: loki_data}
+
+networks:
+  monitoring: {name: monitoring}
+  proxy: {external: true, name: proxy}

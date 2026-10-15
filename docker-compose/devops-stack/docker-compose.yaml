@@ -1,0 +1,79 @@
+name: devops-stack
+
+services:
+  traefik:
+    image: traefik:v3.6.16
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - --api.dashboard=true
+      - --api.insecure=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=proxy
+      - --entrypoints.web.address=:80
+      - --entrypoints.traefik.address=:8089
+    ports:
+      - "80:80"
+      - "8089:8089"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [proxy]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.traefik.rule=Host(`traefik.mallard`)
+      - traefik.http.routers.traefik.entrypoints=web
+      - traefik.http.routers.traefik.service=api@internal
+
+  gitea:
+    image: gitea/gitea:1.21-rootless
+    container_name: gitea
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ}
+      - GITEA__database__DB_TYPE=postgres
+      - GITEA__database__HOST=postgres:5432
+      - GITEA__database__NAME=gitea
+      - GITEA__database__USER=${POSTGRES_USER}
+      - GITEA__database__PASSWD=${POSTGRES_PASSWORD}
+      - GITEA__server__DOMAIN=gitea.mallard
+      - GITEA__server__ROOT_URL=http://gitea.mallard/
+      - GITEA__server__SSH_DOMAIN=gitea.mallard
+      - GITEA__server__SSH_PORT=2222
+      - GITEA__server__SSH_LISTEN_PORT=2222
+      - GITEA__actions__ENABLED=true
+    ports:
+      - "3001:3000"
+      - "2222:2222"
+    volumes:
+      - gitea_data:/var/lib/gitea
+      - gitea_config:/etc/gitea
+    networks: [proxy, data-net]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.gitea.rule=Host(`gitea.mallard`)
+      - traefik.http.routers.gitea.entrypoints=web
+      - traefik.http.services.gitea.loadbalancer.server.port=3000
+      
+  act_runner:
+    image: gitea/act_runner:latest
+    container_name: act_runner
+    restart: unless-stopped
+    depends_on: [gitea]
+    environment:
+      - GITEA_INSTANCE_URL=http://gitea:3000
+      - GITEA_RUNNER_REGISTRATION_TOKEN=${GITEA_RUNNER_TOKEN}
+      - GITEA_RUNNER_NAME=mallard-runner
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - act_runner_data:/data
+    networks: [proxy]
+
+volumes:
+  gitea_data:   {name: gitea_data}
+  gitea_config: {name: gitea_config}
+  act_runner_data: {name: act_runner_data}
+
+networks:
+  proxy:    {external: true, name: proxy}
+  data-net: {external: true, name: data-net}

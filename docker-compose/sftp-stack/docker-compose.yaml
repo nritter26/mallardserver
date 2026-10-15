@@ -1,0 +1,12 @@
+name: sftp-stack
+
+services:
+  sftp:
+    image: atmoz/sftp:latest
+    container_name: sftp
+    restart: unless-stopped
+    command: ${SFTP_USER}:${SFTP_PASSWORD}:${SFTP_UID}:${SFTP_GID}
+    ports:
+      - "2224:22"
+    volumes:
+      - /data/ftp:/home/${SFTP_USER}/upload

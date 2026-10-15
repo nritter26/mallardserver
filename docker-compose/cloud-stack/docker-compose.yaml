@@ -1,0 +1,77 @@
+name: cloud-stack
+
+services:
+  cloud-minio:
+    image: docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    container_name: cloud-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks: [cloud-net, proxy]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.minio.rule=Host(`minio.mallard`)
+      - traefik.http.routers.minio.entrypoints=web
+      - traefik.http.services.minio.loadbalancer.server.port=9001
+
+  cloud-filestash:
+    image: machines/filestash:latest
+    container_name: cloud-filestash
+    restart: unless-stopped
+    environment:
+      - APPLICATION_URL=http://192.168.1.121:8334
+    ports:
+      - "8334:8334"
+    volumes:
+      - filestash_data:/app/data/state
+    networks: [cloud-net, proxy]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.filestash.rule=Host(`filestash.mallard`)
+      - traefik.http.routers.filestash.entrypoints=web
+      - traefik.http.services.filestash.loadbalancer.server.port=8334
+
+  cloud-caddy:
+    image: caddy:2-alpine
+    container_name: cloud-caddy
+    restart: unless-stopped
+    ports:
+      - "8480:80"
+      - "8444:443"
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [cloud-filestash]
+    networks: [cloud-net, proxy]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.caddy.rule=Host(`caddy.mallard`)
+      - traefik.http.routers.caddy.entrypoints=web
+      - traefik.http.services.caddy.loadbalancer.server.port=80
+
+configs:
+  caddyfile:
+    content: |
+      :80 {
+        reverse_proxy cloud-filestash:8334
+      }
+
+volumes:
+  minio_data:     {name: minio_data}
+  filestash_data: {name: filestash_data}
+  caddy_data:     {name: caddy_data}
+  caddy_config:   {name: caddy_config}
+
+networks:
+  cloud-net: {name: cloud-net}
+  proxy: {external: true, name: proxy}
