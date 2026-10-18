@@ -1,0 +1,144 @@
+services:
+  # --- Hoppscotch (API client) ---
+  hoppscotch-migrate:                   # one-shot DB migration, exits 0 when done
+    image: hoppscotch/hoppscotch:latest
+    restart: "no"
+    entrypoint: ["sh", "-c", "pnpm exec prisma migrate deploy"]
+    environment:
+      DATABASE_URL: postgresql://${HOPPSCOTCH_DB_USER:-hoppscotch}:${HOPPSCOTCH_DB_PASSWORD:?set HOPPSCOTCH_DB_PASSWORD}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${HOPPSCOTCH_DB_NAME:-hoppscotch}
+    networks: [data]
+
+  hoppscotch:
+    image: hoppscotch/hoppscotch:latest
+    restart: unless-stopped
+    depends_on:
+      hoppscotch-migrate:
+        condition: service_completed_successfully
+    ports:
+      - "${HOPPSCOTCH_APP_PORT:-3002}:3000"
+      - "${HOPPSCOTCH_ADMIN_PORT:-3101}:3100"
+      - "${HOPPSCOTCH_BACKEND_PORT:-3170}:3170"
+    environment:
+      DATABASE_URL: postgresql://${HOPPSCOTCH_DB_USER:-hoppscotch}:${HOPPSCOTCH_DB_PASSWORD}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${HOPPSCOTCH_DB_NAME:-hoppscotch}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?set DATA_ENCRYPTION_KEY}
+      TOKEN_SALT_COMPLEXITY: "10"
+      MAGIC_LINK_TOKEN_VALIDITY: "3"
+      REFRESH_TOKEN_VALIDITY: "604800000"
+      ACCESS_TOKEN_VALIDITY: "86400000"
+      ALLOW_SECURE_COOKIES: ${ALLOW_SECURE_COOKIES:-false}
+
+      # URLs must match how you open the app in the browser
+      REDIRECT_URL: http://${HOST}:${HOPPSCOTCH_APP_PORT:-3002}
+      WHITELISTED_ORIGINS: http://${HOST}:${HOPPSCOTCH_BACKEND_PORT:-3170},http://${HOST}:${HOPPSCOTCH_APP_PORT:-3002},http://${HOST}:${HOPPSCOTCH_ADMIN_PORT:-3101}
+      VITE_BASE_URL: http://${HOST}:${HOPPSCOTCH_APP_PORT:-3002}
+      VITE_SHORTCODE_BASE_URL: http://${HOST}:${HOPPSCOTCH_APP_PORT:-3002}
+      VITE_ADMIN_URL: http://${HOST}:${HOPPSCOTCH_ADMIN_PORT:-3101}
+      VITE_BACKEND_GQL_URL: http://${HOST}:${HOPPSCOTCH_BACKEND_PORT:-3170}/graphql
+      VITE_BACKEND_WS_URL: ws://${HOST}:${HOPPSCOTCH_BACKEND_PORT:-3170}/graphql
+      VITE_BACKEND_API_URL: http://${HOST}:${HOPPSCOTCH_BACKEND_PORT:-3170}/v1
+
+      VITE_ALLOWED_AUTH_PROVIDERS: ${VITE_ALLOWED_AUTH_PROVIDERS:-EMAIL}
+      MAILER_SMTP_ENABLE: "true"
+      MAILER_USE_CUSTOM_CONFIGS: "true"
+      MAILER_ADDRESS_FROM: ${MAILER_FROM:-hoppscotch@mallard}
+      MAILER_SMTP_URL: ${MAILER_SMTP_URL:-smtp://mailpit:1025}
+    networks: [dev, data]
+
+  # --- Always-on dev services ---
+  api:                                  # Go API with hot reload (Air)
+    image: cosmtrek/air:latest
+    working_dir: /app
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgresql://${APP_DB_USER:-app}:${APP_DB_PASSWORD:?set APP_DB_PASSWORD}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${APP_DB_NAME:-app}
+      SMTP_ADDR: ${SMTP_ADDR:-mailpit:1025}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-mallard-api}
+    volumes:
+      - ${DEV_SRC_PATH:-/srv/dev/api}:/app
+      - go_mod_cache:/go/pkg/mod
+    ports:
+      - "${API_PORT:-8080}:8080"
+    networks: [dev, data]               # data = reach postgres and otel-collector by name
+
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+    ports:
+      - "${MAILPIT_UI_PORT:-8025}:8025"     # web UI
+      - "${MAILPIT_SMTP_PORT:-1025}:1025"   # SMTP
+    networks: [dev, data]
+
+  swagger-ui:
+    image: swaggerapi/swagger-ui:latest
+    restart: unless-stopped
+    environment:
+      SWAGGER_JSON: /spec/openapi.yaml
+    volumes:
+      - ${DEV_SRC_PATH:-/srv/dev/api}/openapi.yaml:/spec/openapi.yaml:ro
+    ports:
+      - "${SWAGGER_PORT:-8082}:8080"
+    networks: [dev]
+
+  prism:                                # mock server from the same spec
+    image: node:20-alpine
+    restart: unless-stopped
+    command: npx --yes @stoplight/prism-cli@5 mock -h 0.0.0.0 -p 4010 --no-multiprocess /spec/openapi.yaml
+    volumes:
+      - ${DEV_SRC_PATH:-/srv/dev/api}/openapi.yaml:/spec/openapi.yaml:ro
+    ports:
+      - "${PRISM_PORT:-4010}:4010"
+    networks: [dev]
+
+  # --- On-demand tools (idle until you exec into them) ---
+  k6:
+    image: grafana/k6:latest
+    restart: unless-stopped
+    entrypoint: ["sh", "-c", "sleep infinity"]
+    environment:
+      K6_WEB_DASHBOARD: ${K6_WEB_DASHBOARD:-true}
+      K6_WEB_DASHBOARD_HOST: 0.0.0.0    # reachable from outside the container
+    volumes:
+      - ${LOADTEST_PATH:-/srv/dev/loadtests}/k6:/scripts
+    ports:
+      - "${K6_DASHBOARD_PORT:-5665}:5665"   # live only during a test run
+    networks: [dev]
+
+  artillery:
+    image: artilleryio/artillery:latest
+    restart: unless-stopped
+    entrypoint: ["sh", "-c", "sleep infinity"]
+    volumes:
+      - ${LOADTEST_PATH:-/srv/dev/loadtests}/artillery:/scripts
+    networks: [dev]
+
+  codegen:
+    image: golang:1.23
+    working_dir: /app
+    restart: unless-stopped
+    entrypoint: ["sh", "-c", "sleep infinity"]
+    volumes:
+      - ${DEV_SRC_PATH:-/srv/dev/api}:/app
+      - go_mod_cache:/go/pkg/mod
+    networks: [dev]
+
+volumes:
+  go_mod_cache:
+
+# Keys (dev, data) must match what services use above.
+# Both networks must already exist on the host:
+#   dev-net  -> docker network create dev-net
+#   data-net -> created by data-stack (postgres lives on it)
+networks:
+  dev:
+    external: true
+    name: ${DEV_NETWORK:-dev-net}
+  data:
+    external: true
+    name: ${DATA_NETWORK:-data-net}

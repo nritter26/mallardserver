@@ -1,17 +1,17 @@
 # Mallard Infrastructure Home Lab Ecosystem
 ## Current-State Infrastructure & Full-Stack Architecture
 
-> **Last Updated:** 2026-10-15
+> **Last Updated:** 2026-10-18
 > **Host:** `mallardserver2`
 > **Local IP:** `192.168.1.121`
 > **Purpose:** Self-hosted backend engineering, DevOps, infrastructure, observability, AI, project management, storage, and networking laboratory.
-> **Source of truth:** `docker ps` snapshot (42 running containers)
+> **Source of truth:** `docker ps` snapshot of 2026-10-15 (42 running containers) plus the `dev-stack` added on 2026-10-18. Take a fresh `docker ps` snapshot to confirm the new total (expected 50 running, plus the exited one-shot `hoppscotch-migrate`)
 
 ---
 
 ## 1. Executive Overview
 
-This document describes the **current deployed state** of the Mallard Homelab running on `mallardserver2`, based on active container introspection.
+This document describes the **current deployed state** of the Mallard Homelab running on `mallardserver2`, based on active container introspection, plus the `dev-stack` for Go API development, added on 2026-10-18.
 
 The environment is built on Docker and Docker Compose, with Portainer for container management. Traefik is the primary reverse proxy and edge router (`:80`, `:8089`). Plane is the central project management platform and ships with its own Caddy proxy (`plane-proxy`, `:8092`). Local DNS is served by Pi-hole using the `.mallard` naming convention, and Tailscale provides remote mesh access.
 
@@ -26,8 +26,23 @@ The environment is built on Docker and Docker Compose, with Portainer for contai
 - `cloud-stack` (Filestash, Caddy, MinIO)
 - `sftp-stack` (SFTP)
 - `vpn-stack` (Tailscale)
+- `dev-stack` (Hoppscotch, Go API with Air hot reload, Mailpit, Swagger UI, Prism, k6, Artillery, oapi-codegen)
 
-### Changes since 2026-09-05
+### Under evaluation
+
+- **Lightweight orchestration** (k3s, or Nomad): no decision yet. Current plan is to keep the working lab on Docker Compose and trial k3s on a separate node or with `k3d`, moving only stateless services first. Docker-socket tools (Promtail, cAdvisor, Traefik's Docker provider, `act_runner`), the GPU workload (`llama-swap`) and Pi-hole (port 53) are the hardest to migrate.
+
+### Changes since 2026-10-15
+
+| Change | Detail |
+|---|---|
+| **Added** | `dev-stack`: `hoppscotch`, `api` (Air), `mailpit`, `swagger-ui`, `prism`, `k6`, `artillery`, `codegen` (+ one-shot `hoppscotch-migrate`) |
+| **Port remaps** | Hoppscotch and Swagger UI use non-default host ports to avoid collisions with Grafana (`:3000`) and mongo-express (`:8081`), see section 3.7 |
+| **Database** | Hoppscotch and the Go API reuse `postgres` from `data-stack` with dedicated databases and users |
+| **Configuration** | `dev-stack` is fully env-driven: ports, networks, DB names/users, host paths and secrets come from `.env` (git-ignored); `.env.example` is committed |
+| **Added port** | `5665` k6 web dashboard (live only during a test run) |
+
+### Earlier changes (2026-09-05 → 2026-10-15)
 
 | Change | Detail |
 |---|---|
@@ -57,14 +72,15 @@ The environment is built on Docker and Docker Compose, with Portainer for contai
 | **Download Staging** | `/data/downloads` |
 | **Backup Storage** | `/data/backups` |
 | **Docker Volumes** | `/var/lib/docker/volumes` |
+| **Dev Source Code** | `/srv/dev/api` (Go API), `/srv/dev/loadtests` (k6 / Artillery scripts) |
 
-![Architecture](images/specs.png)
+![Architecture](docs/specs.png)
 
 ---
 
 ## 3. Active Containers
 
-![Architecture](images/screenshot.png)
+![Architecture](docs/screenshot.png)
 
 ### 3.1 DevOps & Edge
 
@@ -81,7 +97,7 @@ The environment is built on Docker and Docker Compose, with Portainer for contai
 
 | Container | Image / Version | Host Ports → Container | Purpose |
 |---|---|---|---|
-| `postgres` | `postgres:18-alpine` | `5433` → `5432` | Primary PostgreSQL |
+| `postgres` | `postgres:18-alpine` | `5433` → `5432` | Primary PostgreSQL (also hosts the `hoppscotch` and `app` databases) |
 | `pgadmin` | `dpage/pgadmin4:9.17` | `5050` → `80` | PostgreSQL web client |
 | `mongodb` | `mongo:7.0` | `27017` | MongoDB backend |
 | `mongo-express` | `mongo-express:latest` | `8081` | MongoDB admin UI |
@@ -138,6 +154,38 @@ The environment is built on Docker and Docker Compose, with Portainer for contai
 | `cloud-caddy` | `caddy:2-alpine` | `8480` → `80`, `8444` → `443` | Web server / proxy for cloud stack |
 | `sftp` | `atmoz/sftp:latest` | `2224` → `22` | SFTP file transfer |
 
+### 3.7 Go API Development (`dev-stack`)
+
+Spec-first workflow for the Go backend: `openapi.yaml` drives docs (Swagger UI), mocks (Prism), generated Go code (oapi-codegen), and Hoppscotch collections.
+
+| Container | Image / Version | Host Ports → Container | Purpose | Status |
+|---|---|---|---|---|
+| `hoppscotch` | `hoppscotch/hoppscotch:latest` (AIO) | `3002` → `3000` (app), `3101` → `3100` (admin), `3170` (backend) | Self-hosted API client | Deployed |
+| `hoppscotch-migrate` | `hoppscotch/hoppscotch:latest` | none | One-shot Prisma migration job (exits 0, stays stopped) | One-shot |
+| `api` | `cosmtrek/air:latest` | `8080` | Go API with hot reload (source mounted from `/srv/dev/api`) | Deployed |
+| `mailpit` | `axllent/mailpit:latest` | `8025` (web UI), `1025` (SMTP) | Catches outgoing mail from the API and Hoppscotch | Deployed |
+| `swagger-ui` | `swaggerapi/swagger-ui:latest` | `8082` → `8080` | Renders `openapi.yaml` docs | Deployed |
+| `prism` | `node:20-alpine` (runs `@stoplight/prism-cli@5` via `npx`) | `4010` | Mock server generated from `openapi.yaml` | Deployed |
+| `k6` | `grafana/k6:latest` | `5665` (web dashboard) | Load testing (on-demand, idle container, exec into it) | Deployed |
+| `artillery` | `artilleryio/artillery:latest` | none | Scenario / load testing (on-demand) | Deployed |
+| `codegen` | `golang:1.23` | none | Runs `oapi-codegen` to generate Go types and server code | Deployed |
+
+**Notes**
+
+| Topic | Detail |
+|---|---|
+| **Host port remaps** | Hoppscotch default `:3000` (Grafana) → `:3002`; admin default `:3100` → `:3101`; Swagger UI default `:8081` (mongo-express) → `:8082`. All ports are variables in `.env` |
+| **Database** | Databases `hoppscotch` and `app` with separate users on the shared `postgres` container. Hoppscotch migrations on `postgres:18-alpine` are untested; use a small dedicated Postgres if they fail |
+| **Networks** | Joins the external `dev-net` (created with `docker network create dev-net`) and `data-net` (data-stack) so containers reach `postgres` and `otel-collector` by name |
+| **SMTP** | Both the Go API and Hoppscotch send mail to `mailpit:1025`; Hoppscotch login links appear in the Mailpit UI |
+| **Hoppscotch requests** | Requests go from the browser, so use LAN URLs (`http://192.168.1.121:8080`), not container names. The Go API needs CORS for `http://192.168.1.121:3002`, or use the Hoppscotch browser extension or proxy |
+| **Prism** | Runs with `--no-multiprocess` on `node:20-alpine` (the `stoplight/prism` image crashed with `reading 'isPrimary'`). Needs at least one endpoint in `openapi.yaml`, and a restart after every spec change |
+| **Bind mounts** | `openapi.yaml` must exist as a file before deploy; `/srv/dev` must be owned by `mallard` |
+| **Image tags** | Pin versions before long-term use (several images are on `latest`) |
+| **Hoppscotch data** | Personal collections may live in browser storage; use team workspaces and periodic exports |
+| **Tracing / metrics** | The Go API exports OTLP to `otel-collector:4317`; expose `/metrics` for Prometheus |
+| **Secrets** | Real `.env` stays local and git-ignored; use stronger DB passwords if the lab is ever exposed beyond the LAN |
+
 ---
 
 ## 4. Health Notes (as of snapshot)
@@ -148,6 +196,7 @@ The environment is built on Docker and Docker Compose, with Portainer for contai
 | `act_runner` | Up ~1 min | Started later than the rest (likely restarted or waiting on Gitea) |
 | All other containers | Up ~4 min | Host or Docker daemon was restarted shortly before the snapshot |
 | Healthy checks passing | `plane-admin`, `plane-web`, `plane-db`, `cadvisor`, `llama-swap`, `mongodb`, `pihole`, `postgres` | |
+| `dev-stack` | Deployed 2026-10-18 | Not part of the 2026-10-15 snapshot. Expected total: 50 running, plus exited one-shot `hoppscotch-migrate`. Confirm with a fresh `docker ps` |
 
 ### Documented but not currently running
 
@@ -171,20 +220,29 @@ The `media-stack`, `torrent-stack`, and `backup-stack` named in the previous doc
 |---|---|
 | `53` | Pi-hole DNS |
 | `80` | Traefik |
+| `1025` | Mailpit SMTP |
 | `2222` | Gitea SSH |
 | `2224` | SFTP |
 | `3000` | Grafana |
 | `3001` | Gitea Web |
+| `3002` | Hoppscotch app |
 | `3080` | LibreChat |
+| `3101` | Hoppscotch admin |
+| `3170` | Hoppscotch backend |
+| `4010` | Prism mock server |
 | `4317-4318` | OTel Collector |
 | `5050` | pgAdmin |
 | `5433` | PostgreSQL |
 | `5540` | RedisInsight |
+| `5665` | k6 web dashboard (live only during a test run) |
 | `5672` / `15672` | RabbitMQ / management UI |
 | `5678` | n8n |
 | `6379` | Redis |
 | `8000` | Portainer edge agent |
+| `8025` | Mailpit web UI |
+| `8080` | Go API (Air) |
 | `8081` | mongo-express |
+| `8082` | Swagger UI |
 | `8088` | Pi-hole Web UI |
 | `8089` | Traefik (secondary entrypoint) |
 | `8092` | Plane proxy |
@@ -244,22 +302,39 @@ The `media-stack`, `torrent-stack`, and `backup-stack` named in the previous doc
 │ PostgreSQL │ MongoDB │ Redis │ RabbitMQ       │
 │ MinIO (cloud-minio) │ Plane-dedicated:        │
 │ Postgres 15 / Valkey / RabbitMQ 3.13 / MinIO  │
-└───────────────────────┬───────────────────────┘
-                        ▼
-┌───────────────────────────────────────────────┐
-│               Monitoring Layer                │
-│ Prometheus │ Loki + Promtail │ Jaeger         │
-│ OTel Collector │ cAdvisor │ Node Exporter     │
-│ NVIDIA GPU Exporter                           │
-└───────────────────────────────────────────────┘
+└───────▲───────────────┬───────────────────────┘
+        │               ▼
+        │   ┌───────────────────────────────────────────────┐
+        │   │               Monitoring Layer                │
+        │   │ Prometheus │ Loki + Promtail │ Jaeger         │
+        │   │ OTel Collector │ cAdvisor │ Node Exporter     │
+        │   │ NVIDIA GPU Exporter                           │
+        │   └───────────────────▲───────────────────────────┘
+        │                       │ OTLP / metrics
+┌───────┴───────────────────────┴───────────────────────────┐
+│          Dev Layer (dev-stack)                             │
+│ Go API (Air) :8080 │ Hoppscotch :3002 │ Mailpit :8025     │
+│ Swagger UI :8082 │ Prism :4010                            │
+│ On-demand: k6 │ Artillery │ oapi-codegen                  │
+└───────────────────────────────────────────────────────────┘
 
 Cloud stack (parallel): Filestash :8334 · cloud-caddy :8480/:8444 · cloud-minio :9000-9001 · SFTP :2224
 ```
 
+### Dev workflow (spec-first)
+
+```text
+openapi.yaml ──► Swagger UI (docs)
+             ├─► Prism (mock for frontend)
+             ├─► oapi-codegen ──► Go types + server interface ──► Air rebuilds ──► api :8080
+             └─► Hoppscotch (import spec / collections) ──► k6 / Artillery against http://api:8080
+```
+
 ---
+
 ## 7. Repository Structure
 
-The repo is organized so each stack is self-contained. Anyone can deploy a single stack, or all 10, by copying the folder, filling in the `.env`, and running `docker compose up -d`.
+The repo is organized so each stack is self-contained. Anyone can deploy a single stack, or all of them, by copying the folder, filling in the `.env`, and running `docker compose up -d`.
 
 ```text
 mallard-homelab/
@@ -270,7 +345,7 @@ mallard-homelab/
 │   │   ├── docker-compose.yml
 │   │   ├── .env.example
 │   │   └── README.md
-│   ├── auth-stack/               # Keycloak (+ its Postgres if separate)
+│   ├── auth-stack/               # Keycloak (+ its Postgres if separate), not currently running
 │   │   ├── docker-compose.yml
 │   │   ├── .env.example
 │   │   └── README.md
@@ -299,6 +374,13 @@ mallard-homelab/
 │   │   ├── docker-compose.yml    # db, redis, mq, minio, proxy)
 │   │   ├── .env.example
 │   │   └── README.md
+│   ├── dev-stack/                # Hoppscotch, Go API (Air), Mailpit, Swagger UI,
+│   │   ├── docker-compose.yml    # Prism, k6, Artillery, oapi-codegen
+│   │   ├── .env.example
+│   │   ├── loadtests/
+│   │   │   ├── k6/
+│   │   │   └── artillery/
+│   │   └── README.md
 │   ├── dns-stack/                # Pi-hole
 │   │   ├── docker-compose.yml
 │   │   ├── .env.example
@@ -317,13 +399,15 @@ mallard-homelab/
 │       ├── .env.example
 │       └── README.md
 ├── scripts/
-│   ├── create-networks.sh        # creates shared Docker networks
+│   ├── create-networks.sh        # creates shared Docker networks (incl. dev-net)
 │   ├── up-all.sh                 # starts stacks in dependency order
 │   └── down-all.sh
 └── docs/
     ├── architecture.md           # diagram + port map
     └── dns-records.md            # .mallard hostname list for Pi-hole
 ```
+
+The Go API source lives in its own repository (hosted on Gitea) and is mounted into `dev-stack` from `/srv/dev/api`.
 
 ### Conventions
 
@@ -334,6 +418,20 @@ mallard-homelab/
 | **Shared networks** | Created once with `scripts/create-networks.sh` and declared as `external: true` in each stack |
 | **Config alongside compose** | Service config files live in the stack's `config/` folder and are bind-mounted |
 | **Pinned tags** | Prefer explicit versions over `latest` for reproducibility |
+| **Port allocation** | Check the section 5 port map before assigning a host port; remap rather than reuse |
+| **Env-driven config** | Stacks read ports, paths and secrets from `.env`; keep comments on their own lines in `.env` files |
+
+### Suggested `.mallard` DNS records for `dev-stack`
+
+| Hostname | Target |
+|---|---|
+| `hoppscotch.mallard` | Hoppscotch app (`:3002`) |
+| `api.mallard` | Go API (`:8080`) |
+| `mail.mallard` | Mailpit UI (`:8025`) |
+| `swagger.mallard` | Swagger UI (`:8082`) |
+| `mock.mallard` | Prism (`:4010`) |
+
+If routed through Traefik, add the matching router labels and update Hoppscotch's `REDIRECT_URL`, `WHITELISTED_ORIGINS` and `VITE_*` values to the new hostnames.
 
 ### Deploying
 
@@ -350,6 +448,19 @@ docker compose up -d
 ./scripts/up-all.sh
 ```
 
+### Dev-stack day-to-day commands
+
+```bash
+# Generate Go server code from the spec
+docker exec -it codegen sh -c \
+  "go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@latest \
+   -generate types,chi-server -package api openapi.yaml > api/gen.go"
+
+# Load tests (targets http://api:8080 over dev-net)
+docker exec -it k6 k6 run /scripts/smoke.js
+docker exec -it artillery artillery run /scripts/test.yml
+```
+
 ### Recommended startup order
 
 1. `dns-stack` and `vpn-stack`
@@ -357,4 +468,5 @@ docker compose up -d
 3. `data-stack`
 4. `auth-stack`
 5. `monitoring-stack`
-6. `ai-stack`, `plane-stack`, `cloud-stack`, `sftp-stack`
+6. `dev-stack` (needs `data-stack` for Postgres and `monitoring-stack` for OTLP)
+7. `ai-stack`, `plane-stack`, `cloud-stack`, `sftp-stack`
