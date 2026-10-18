@@ -292,7 +292,7 @@ The `media-stack`, `torrent-stack`, and `backup-stack` named in the previous doc
   ▼     ▼          ▼               ▼                ▼               ▼
 ┌──────┐ ┌───────┐ ┌─────────┐ ┌────────────┐ ┌────────────┐ ┌───────────┐
 │Gitea │ │Grafana│ │ Plane   │ │ LibreChat  │ │ llama-swap │ │ n8n       │
-│+runner│ │       │ │ :8092   │ │ :3080      │ │ :11435     │ │ :5678     │
+│+runner│ │      │ │ :8092   │ │ :3080      │ │ :11435     │ │ :5678     │
 └──┬───┘ └───┬───┘ └────┬────┘ └─────┬──────┘ └────────────┘ └───────────┘
    │         │          │            │  └──── SearXNG (web search)
    │         │          │            │
